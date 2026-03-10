@@ -1,0 +1,20 @@
+services:
+  backend:
+    build: ./backend
+    container_name: mri_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app  # Útil para desarrollo en tiempo real
+    environment:
+      - UPLOAD_DIR=/app/uploads
+
+  frontend:
+    build: ./frontend
+    container_name: mri_frontend
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend
