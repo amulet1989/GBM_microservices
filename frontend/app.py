@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import time
 
 BACKEND_URL = "http://backend:8000"
 
@@ -154,5 +155,106 @@ except Exception as e:
 
 st.divider()
 
+st.divider()
+
 if st.button(f"🚀 Iniciar Inferencia para {active_case}", type="secondary"):
-    st.info("Todo listo. La lógica de inferencia con MONAI (PyTorch) se conectará aquí en el próximo paso.")
+    try:
+        # 1. Enviar la petición para iniciar la tarea
+        res = requests.post(f"{BACKEND_URL}/infer/{active_case}")
+        if res.status_code == 200:
+            task_id = res.json()["task_id"]
+            
+            # Crear contenedores visuales dinámicos
+            status_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            # 2. Polling (Consultar estado cada 2 segundos)
+            with st.spinner("Conectando con el motor de inferencia..."):
+                while True:
+                    time.sleep(2)
+                    task_res = requests.get(f"{BACKEND_URL}/task/{task_id}")
+                    if task_res.status_code == 200:
+                        task_data = task_res.json()
+                        status = task_data["status"]
+                        
+                        if status == "PENDING":
+                            status_text.info("⏳ En cola, esperando un Worker disponible...")
+                        elif status == "PROGRESS":
+                            msg = task_data.get("message", "Procesando...")
+                            status_text.warning(f"⚙️ Procesando: {msg}")
+                            # Simulamos avance visual
+                            progress_bar.progress(50) 
+                        elif status == "SUCCESS":
+                            progress_bar.progress(100)
+                            status_text.success("🎉 ¡Inferencia completada con éxito!")
+                            st.balloons()
+                            st.info("Se han generado los mapas de probabilidad y la segmentación.")
+                            break
+                        elif status == "FAILURE":
+                            status_text.error(f"❌ Fallo en la inferencia: {task_data.get('error')}")
+                            break
+        else:
+            st.error(f"Error al iniciar la tarea: {res.text}")
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+
+# ---------------------------------------------------------
+# DESCARGA DE RESULTADOS
+# ---------------------------------------------------------
+st.divider()
+st.header("📥 Resultados de Inferencia")
+
+# Usamos caché para no descargar el mismo archivo del backend múltiples veces si recargamos la página
+@st.cache_data(show_spinner=False)
+def fetch_result_file(case_id, file_type):
+    url = f"{BACKEND_URL}/download/{case_id}/{file_type}"
+    res = requests.get(url)
+    if res.status_code == 200:
+        return res.content
+    return None
+
+try:
+    # Preguntar al backend si hay resultados listos
+    res_status = requests.get(f"{BACKEND_URL}/results/{active_case}")
+    
+    if res_status.status_code == 200:
+        results_data = res_status.json()
+        
+        if results_data["segmentation"] or results_data["prob_maps"]:
+            st.success(f"✅ Resultados listos y empaquetados para el paciente: `{active_case}`")
+            cols = st.columns(2)
+            
+            # Tarjeta de Segmentación
+            if results_data["segmentation"]:
+                with cols[0]:
+                    st.markdown("#### 🧠 Volumen de Segmentación")
+                    st.info("Contiene las etiquetas de Infiltración Tumoral (2) y Edema Vasogénico (6).")
+                    with st.spinner("Preparando archivo..."):
+                        seg_data = fetch_result_file(active_case, "segmentation")
+                        if seg_data:
+                            st.download_button(
+                                label="⬇️ Descargar Segmentación (.nii.gz)",
+                                data=seg_data,
+                                file_name=f"segmentation_{active_case}.nii.gz",
+                                mime="application/gzip",
+                                type="primary"
+                            )
+                            
+            # Tarjeta de Mapas de Probabilidad
+            if results_data["prob_maps"]:
+                with cols[1]:
+                    st.markdown("#### 📊 Mapas de Probabilidad")
+                    st.info("Tensor en formato Float32 con las probabilidades brutas de cada vóxel.")
+                    with st.spinner("Preparando archivo..."):
+                        prob_data = fetch_result_file(active_case, "prob_maps")
+                        if prob_data:
+                            st.download_button(
+                                label="⬇️ Descargar Mapas (.nii.gz)",
+                                data=prob_data,
+                                file_name=f"prob_maps_{active_case}.nii.gz",
+                                mime="application/gzip"
+                            )
+        else:
+            st.info("Aún no hay resultados de inferencia disponibles para este caso.")
+except Exception as e:
+    st.error(f"Error al verificar la disponibilidad de los resultados: {e}")

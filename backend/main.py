@@ -2,11 +2,23 @@ import os
 import shutil
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import List
+from celery import Celery
+from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
+
+# Configurar cliente Celery para enviar tareas
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
+celery_app = Celery("inference_tasks", broker=CELERY_BROKER_URL, backend=CELERY_RESULT_BACKEND)
 
 app = FastAPI(title="MRI Inference API")
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Directorio base para resultados
+RESULTS_DIR = os.getenv("RESULTS_DIR", "/app/shared_data/results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 MODALITY_ORDER = {
     "images_DSC": ["DSC_ap-rCBV", "DSC_PH", "DSC_PSR"],
@@ -147,3 +159,63 @@ def check_upload_status(case_id: str):
                 status_report[category].append({"modality": modality, "status": "Faltante", "files": []})
                 
     return {"status": status_report}
+
+# Endpoint para iniciar la inferencia y otro para consultar el estado de la tarea
+@app.post("/infer/{case_id}")
+def start_inference(case_id: str):
+    """Envía la tarea de inferencia a la cola de Celery."""
+    case_path = os.path.join(UPLOAD_DIR, case_id)
+    if not os.path.exists(case_path):
+        raise HTTPException(status_code=404, detail="El caso no existe.")
+    
+    # Llama a la tarea por su nombre registrado en el worker
+    task = celery_app.send_task("tasks.run_inference_task", args=[case_id])
+    return {"message": "Tarea encolada", "task_id": task.id}
+
+@app.get("/task/{task_id}")
+def get_task_status(task_id: str):
+    """El frontend consultará este endpoint para ver el progreso."""
+    task_result = celery_app.AsyncResult(task_id)
+    
+    response = {
+        "task_id": task_id,
+        "status": task_result.status,
+    }
+    
+    if task_result.status == 'PROGRESS':
+        response["message"] = task_result.info.get('message', 'Procesando...')
+    elif task_result.status == 'SUCCESS':
+        response["result"] = task_result.result
+    elif task_result.status == 'FAILURE':
+        response["error"] = str(task_result.info)
+        
+    return response
+
+@app.get("/results/{case_id}")
+def check_results(case_id: str):
+    """Verifica si existen resultados procesados para un caso específico."""
+    case_results_dir = os.path.join(RESULTS_DIR, case_id)
+    seg_file = os.path.join(case_results_dir, f"segmentation_{case_id}.nii.gz")
+    prob_file = os.path.join(case_results_dir, f"prob_maps_{case_id}.nii.gz")
+    
+    return {
+        "segmentation": os.path.exists(seg_file),
+        "prob_maps": os.path.exists(prob_file)
+    }
+
+@app.get("/download/{case_id}/{file_type}")
+def download_result(case_id: str, file_type: str):
+    """Envía el archivo NIfTI solicitado para ser descargado por el usuario."""
+    if file_type not in ["segmentation", "prob_maps"]:
+        raise HTTPException(status_code=400, detail="Tipo de archivo inválido.")
+    
+    file_path = os.path.join(RESULTS_DIR, case_id, f"{file_type}_{case_id}.nii.gz")
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Archivo no encontrado. Quizás la inferencia no ha terminado.")
+        
+    return FileResponse(
+        path=file_path, 
+        filename=f"{file_type}_{case_id}.nii.gz", 
+        media_type="application/gzip"
+    )

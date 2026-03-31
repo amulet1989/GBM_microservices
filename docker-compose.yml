@@ -1,20 +1,53 @@
+
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: mri_redis
+    ports:
+      - "6379:6379"
+
   backend:
     build: ./backend
     container_name: mri_backend
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app  # Útil para desarrollo en tiempo real
+      - ./shared_data:/app/shared_data
     environment:
-      - UPLOAD_DIR=/app/uploads
+      - UPLOAD_DIR=/app/shared_data/uploads
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - redis
+
+  worker:
+    build: ./worker
+    container_name: mri_worker
+    volumes:
+      - ./shared_data:/app/shared_data
+    environment:
+      - UPLOAD_DIR=/app/shared_data/uploads
+      - RESULTS_DIR=/app/shared_data/results
+      - MODELS_DIR=/app/shared_data/trained_models
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - EXECUTION_DEVICE=${EXECUTION_DEVICE:-auto}   # Opciones: "auto", "cuda", "cpu"
+    depends_on:
+      - redis
+      - backend
+    # IMPORTANTE: Esto habilita la GPU dentro del contenedor
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   frontend:
     build: ./frontend
     container_name: mri_frontend
     ports:
       - "8501:8501"
-    volumes:
-      - ./frontend:/app
     depends_on:
       - backend

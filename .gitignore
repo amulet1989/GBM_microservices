@@ -1,2 +1,6 @@
 backend/uploads
 __pycache__
+*.pt
+*.pth
+*uploads
+*results

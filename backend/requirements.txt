@@ -4,3 +4,5 @@ python-multipart==0.0.6
 dicom2nifti==2.4.8
 nibabel==5.1.0
 pydicom==2.4.3
+celery==5.3.4
+redis==5.0.1
