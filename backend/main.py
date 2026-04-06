@@ -3,6 +3,7 @@ import shutil
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import List
 from celery import Celery
+from celery import chain
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 
@@ -98,6 +99,32 @@ async def upload_bulk_files(case_id: str, files: List[UploadFile] = File(...)):
         "unmatched_files": unmatched_files
     }
 
+# @app.post("/upload/{case_id}")
+# async def upload_manual_files(
+#     case_id: str,
+#     category: str = Form(...),
+#     modality: str = Form(...),
+#     files: List[UploadFile] = File(...)
+# ):
+#     """Carga manual con regla de REEMPLAZO por modalidad."""
+#     category_path = os.path.join(UPLOAD_DIR, case_id, category)
+#     os.makedirs(category_path, exist_ok=True)
+    
+#     # --- NUEVA LÓGICA DE REEMPLAZO ---
+#     for existing_file in os.listdir(category_path):
+#         if modality in existing_file:
+#             os.remove(os.path.join(category_path, existing_file))
+#     # ---------------------------------
+            
+#     saved_files = []
+#     for file in files:
+#         file_location = os.path.join(category_path, file.filename)
+#         with open(file_location, "wb+") as file_object:
+#             file_object.write(await file.read())
+#         saved_files.append(file.filename)
+        
+#     return {"category": category, "modality": modality, "saved_files": saved_files}
+
 @app.post("/upload/{case_id}")
 async def upload_manual_files(
     case_id: str,
@@ -105,24 +132,35 @@ async def upload_manual_files(
     modality: str = Form(...),
     files: List[UploadFile] = File(...)
 ):
-    """Carga manual con regla de REEMPLAZO por modalidad."""
+    """Carga manual con aislamiento inteligente para DICOMs."""
     category_path = os.path.join(UPLOAD_DIR, case_id, category)
     os.makedirs(category_path, exist_ok=True)
     
-    # --- NUEVA LÓGICA DE REEMPLAZO ---
+    # Limpiar archivos anteriores de la misma modalidad
     for existing_file in os.listdir(category_path):
         if modality in existing_file:
             os.remove(os.path.join(category_path, existing_file))
-    # ---------------------------------
             
-    saved_files = []
-    for file in files:
-        file_location = os.path.join(category_path, file.filename)
-        with open(file_location, "wb+") as file_object:
-            file_object.write(await file.read())
-        saved_files.append(file.filename)
+    # Si viene más de un archivo o no tiene extensión .nii.gz, asumimos que es una serie DICOM
+    is_dicom_series = len(files) > 1 or not files[0].filename.endswith('.nii.gz')
+    
+    if is_dicom_series:
+        # Aislar los DICOMs en una carpeta temporal con el nombre de la modalidad
+        dicom_dir = os.path.join(category_path, f"{modality}_dicoms")
+        os.makedirs(dicom_dir, exist_ok=True)
         
-    return {"category": category, "modality": modality, "saved_files": saved_files}
+        for file in files:
+            file_location = os.path.join(dicom_dir, file.filename)
+            with open(file_location, "wb+") as f:
+                f.write(await file.read())
+    else:
+        # Es un NIfTI único, se guarda normal
+        for file in files:
+            file_location = os.path.join(category_path, file.filename)
+            with open(file_location, "wb+") as f:
+                f.write(await file.read())
+        
+    return {"category": category, "modality": modality, "saved_files": [f.filename for f in files]}
 
 # --- NUEVO ENDPOINT PARA ELIMINAR MODALIDADES ESPECÍFICAS ---
 @app.delete("/cases/{case_id}/{category}/{modality}")
@@ -219,3 +257,21 @@ def download_result(case_id: str, file_type: str):
         filename=f"{file_type}_{case_id}.nii.gz", 
         media_type="application/gzip"
     )
+
+@app.post("/process/{case_id}")
+def start_processing(case_id: str, run_preprocessing: bool = True):
+    """Inicia el pipeline. Puede incluir preprocesamiento o ir directo a inferencia."""
+    case_path = os.path.join(UPLOAD_DIR, case_id)
+    if not os.path.exists(case_path):
+        raise HTTPException(status_code=404, detail="El caso no existe.")
+    
+    if run_preprocessing:
+        task_chain = chain(
+            celery_app.signature("tasks.run_preprocessing_task", args=[case_id]),
+            # Añadimos immutable=True para que ignore el output de la tarea anterior
+            celery_app.signature("tasks.run_inference_task", args=[case_id], immutable=True)
+        )()
+        return {"message": "Preprocesamiento + Inferencia encolados", "task_id": task_chain.id}
+    else:
+        task = celery_app.send_task("tasks.run_inference_task", args=[case_id])
+        return {"message": "Inferencia encolada", "task_id": task.id}

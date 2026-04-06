@@ -154,13 +154,15 @@ except Exception as e:
     st.error(f"Error al obtener el estado: {e}")
 
 st.divider()
-
-st.divider()
+# Switch para decidir el flujo
+needs_preprocessing = st.checkbox("⚙️ Ejecutar Preprocesamiento BraTS (Conversión DICOM, N4, Co-registro, Skull Stripping)", value=True, help="Desmarca esta opción si tus NIfTI ya pasaron por el pipeline de estandarización.")
 
 if st.button(f"🚀 Iniciar Inferencia para {active_case}", type="secondary"):
     try:
+
         # 1. Enviar la petición para iniciar la tarea
-        res = requests.post(f"{BACKEND_URL}/infer/{active_case}")
+        url = f"{BACKEND_URL}/process/{active_case}?run_preprocessing={str(needs_preprocessing).lower()}"
+        res = requests.post(url)
         if res.status_code == 200:
             task_id = res.json()["task_id"]
             

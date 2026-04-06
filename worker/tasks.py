@@ -8,6 +8,14 @@ from celery_app import celery_app
 from monai import transforms
 from monai.networks.nets import SwinUNETR
 from monai.inferers import sliding_window_inference
+import subprocess
+from brats_preprocess import run_brats_pipeline
+import sys
+
+# Asegúrate de importar el dicom_helper. Como está en el backend, 
+# la forma más fácil es tener una copia en /worker/utils/dicom_helper.py 
+# o compartir la carpeta.
+from utils.dicom_helper import convert_dicom_to_nifti_for_case
 
 # Variables globales
 models_loaded = False
@@ -120,24 +128,6 @@ def load_all_models():
     print(f"Todos los modelos cargados exitosamente en {device}.")
 
 
-# def generate_probability_maps(embeddings, projection_head, classifier, device, batch_size=8192):
-#     with torch.no_grad():
-#         embeddings = embeddings.squeeze(0).permute(1, 2, 3, 0)
-#         embeddings_flat = embeddings.reshape(-1, 48)
-#         probs_flat = []
-#         for i in range(0, embeddings_flat.shape[0], batch_size):
-#             batch = embeddings_flat[i:i+batch_size].to(device)
-#             z = projection_head(batch)
-#             z = F.normalize(z, dim=1)
-#             logits = classifier(z)
-#             probs = F.softmax(logits, dim=1)
-#             probs_flat.append(probs.cpu())
-        
-#         probs_flat = torch.cat(probs_flat, dim=0)
-#         probs = probs_flat.reshape(128, 128, 128, 3)
-#         probs = probs.permute(3, 0, 1, 2)
-#     return probs
-
 def generate_probability_maps(embeddings, projection_head, classifier, device, batch_size=8192):
     projection_head.eval()
     classifier.eval()
@@ -164,6 +154,28 @@ def generate_probability_maps(embeddings, projection_head, classifier, device, b
         
     return probs.to(device) # Regresamos a la GPU para que MONAI pueda ensamblar
 
+# Preprocesamiento BraTS: Corrección N4, Registro al Atlas SRI, Skull Stripping y Co-registro de Modalidades
+@celery_app.task(bind=True)
+def run_preprocessing_task(self, case_id: str):
+    """Tarea dedicada exclusivamente a convertir DICOM y estandarizar a BraTS."""
+    try:
+        upload_dir = os.getenv("UPLOAD_DIR", "/app/shared_data/uploads")
+        case_path = os.path.join(upload_dir, case_id)
+        
+        self.update_state(state='PROGRESS', meta={'message': 'Verificando y convirtiendo DICOM a NIfTI...'})
+        convert_dicom_to_nifti_for_case(case_path)
+        
+        self.update_state(state='PROGRESS', meta={'message': 'Ejecutando pipeline de preprocesamiento (ANTs)...'})
+        atlas_path = "/app/shared_data/atlas/sri24_t1.nii.gz"
+        atlas_mask_path = "/app/shared_data/atlas/sri24_mask.nii.gz" # <-- NUEVO
+        
+        run_brats_pipeline(case_path, atlas_path, atlas_mask_path) # <-- NUEVO
+        
+        return {"status": "success", "message": "Preprocesamiento completado", "case_id": case_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# Inferencia Principal: Carga modelos, ensambla canales, corre inferencia por ventana deslizante y guarda resultados
 @celery_app.task(bind=True)
 def run_inference_task(self, case_id: str):
     try:
