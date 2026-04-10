@@ -242,59 +242,121 @@ def run_inference_task(self, case_id: str):
 
         self.update_state(state='PROGRESS', meta={'message': 'Ejecutando Inferencia por Ventana Deslizante (SwinUNETR)...'})
         
+        # with torch.no_grad():
+            
+        #     def predictor_fn(patch):
+        #         _ = model1(patch)
+        #         _ = model2(patch)
+                
+        #         emb1 = decoder_features_model1
+        #         emb2 = decoder_features_model2
+                
+        #         p1 = generate_probability_maps(emb1, projection_head1, classifier1, device)
+        #         p2 = generate_probability_maps(emb2, projection_head2, classifier2, device)
+
+        #         comb = torch.zeros_like(p1)
+        #         comb[0] = p1[0]
+        #         comb[1] = torch.max(p1[1], p2[1])
+        #         comb[2] = p2[2]
+        #         comb = comb / (comb.sum(dim=0, keepdim=True) + 1e-6)
+                
+        #         # TRUCO DE RENDIMIENTO: Apilamos los 3 tensores de [3, H, W, D] 
+        #         # en un super-tensor de [9, H, W, D] para extraerlo todo en una sola pasada.
+        #         stacked_maps = torch.cat([comb, p1, p2], dim=0)
+        #         return stacked_maps.unsqueeze(0)
+
+        #     roi_size = (128, 128, 128)
+        #     sw_batch_size = 1 
+        
         with torch.no_grad():
             
-            # Envolvemos tus dos pipelines en una única función que procesará CADA PARCHE de 128^3
             def predictor_fn(patch):
-                # patch shape: [1, 11, 128, 128, 128]
                 _ = model1(patch)
                 _ = model2(patch)
                 
-                # Los hooks capturan las features de este parche específico
                 emb1 = decoder_features_model1
                 emb2 = decoder_features_model2
                 
-                # Generamos probabilidades para este parche
                 p1 = generate_probability_maps(emb1, projection_head1, classifier1, device)
                 p2 = generate_probability_maps(emb2, projection_head2, classifier2, device)
 
-                # Combinamos
+                # --- NUEVA OPERACIÓN: REFINAMIENTO DE INFILTRACIÓN ---
+                # 1. Restamos el Tumor Core (p1[1]) a la Infiltración (p2[1]) y limitamos a 0.0
+                p2_infil_refined = torch.clamp(p2[1] - p1[1], min=0.0)
+                
+                # 2. Calculamos la masa de probabilidad que fue removida por el solapamiento
+                mass_removed = p2[1] - p2_infil_refined
+                
+                # 3. Sumamos esa masa a la clase "Resto/Fondo" (p2[0]) para que el mapa siga sumando 1.0
+                p2_0_refined = p2[0] + mass_removed
+                
+                # 4. Reconstruimos el tensor de probabilidades del Pipeline 2 con la infiltración limpia
+                p2_refined = torch.stack([p2_0_refined, p2_infil_refined, p2[2]], dim=0)
+                # -----------------------------------------------------
+
                 comb = torch.zeros_like(p1)
                 comb[0] = p1[0]
-                comb[1] = torch.max(p1[1], p2[1])
-                comb[2] = p2[2]
+                # Para la combinación de la Zona de Tratamiento, usamos la infiltración refinada
+                comb[1] = torch.max(p1[1], p2_refined[1]) 
+                comb[2] = p2_refined[2]
+                
+                # Normalización de seguridad
                 comb = comb / (comb.sum(dim=0, keepdim=True) + 1e-6)
                 
-                # Devolvemos el parche procesado con la dimensión batch [1, 3, H, W, D]
-                return comb.unsqueeze(0)
+                # Apilamos los tres modelos usando p2_refined en lugar del p2 original
+                stacked_maps = torch.cat([comb, p1, p2_refined], dim=0)
+                return stacked_maps.unsqueeze(0)
 
-            # Ejecutamos la magia de MONAI: Procesará el volumen completo por pedazos sin explotar la RAM
             roi_size = (128, 128, 128)
-            sw_batch_size = 1 # IMPORTANTE: Procesa 1 parche a la vez para cuidar los 12GB de VRAM
-            
-            # full_prob_maps tendrá el tamaño original completo [1, 3, 240, 240, 155]
+            sw_batch_size = 1 
+            # ... (el resto de tu código sliding_window_inference continúa igual)    
+            # full_prob_maps ahora tiene tamaño [1, 9, 240, 240, 155]
             full_prob_maps = sliding_window_inference(
                 inputs=image_tensor,
                 roi_size=roi_size,
                 sw_batch_size=sw_batch_size,
                 predictor=predictor_fn,
-                overlap=0.25 # 25% de solapamiento para promediar y suavizar los bordes entre parches
+                overlap=0.25 
             )
 
-            # Extraemos el volumen ensamblado
-            prob_maps_np = full_prob_maps.squeeze(0).cpu().numpy() # [3, Original_H, Original_W, Original_D]
-            prob_maps_nifti = np.transpose(prob_maps_np, (1, 2, 3, 0)) # [H, W, D, 3]
+            # Extraemos el volumen y lo dividimos
+            full_prob_np = full_prob_maps.squeeze(0).cpu().numpy() # [9, H, W, D]
             
-            segmentation = np.argmax(prob_maps_np, axis=0).astype(np.int16)
-            segmentation_np_orig = np.zeros_like(segmentation, dtype=np.int16)
-            segmentation_np_orig[segmentation == 1] = 6 # Zona d etratamiento (Tumor Core + Infiltración)
-            segmentation_np_orig[segmentation == 2] = 2 # Vasogénico
+            prob_comb_np = full_prob_np[0:3]
+            prob_p1_np   = full_prob_np[3:6]
+            prob_p2_np   = full_prob_np[6:9]
 
-            self.update_state(state='PROGRESS', meta={'message': 'Guardando volúmenes NIfTI...'})
+            # --- SEGMENTACIONES DISCRETAS ---
+            # 1. Combinado
+            seg_comb = np.argmax(prob_comb_np, axis=0).astype(np.int16)
+            seg_comb_orig = np.zeros_like(seg_comb, dtype=np.int16)
+            seg_comb_orig[seg_comb == 1] = 6 # Zona de Tratamiento
+            seg_comb_orig[seg_comb == 2] = 2 # Edema Vasogénico
             
-            # Guardamos con el affine original para que empate perfectamente con la MRI base
-            nib.save(nib.Nifti1Image(prob_maps_nifti, affine), os.path.join(case_results_dir, f"prob_maps_{case_id}.nii.gz"))
-            nib.save(nib.Nifti1Image(segmentation_np_orig, affine), os.path.join(case_results_dir, f"segmentation_{case_id}.nii.gz"))
+            # 2. Pipeline 1 (0=Fondo, 1=Tumor Core, 2=Edema Total)
+            seg_p1 = np.argmax(prob_p1_np, axis=0).astype(np.int16)
+            
+            # 3. Pipeline 2 (0=Resto, 1=Infiltración, 2=Edema Vasogénico)
+            seg_p2 = np.argmax(prob_p2_np, axis=0).astype(np.int16)
+
+            # Transponer todos para NIfTI [H, W, D, C]
+            prob_comb_nifti = np.transpose(prob_comb_np, (1, 2, 3, 0))
+            prob_p1_nifti   = np.transpose(prob_p1_np, (1, 2, 3, 0))
+            prob_p2_nifti   = np.transpose(prob_p2_np, (1, 2, 3, 0))
+
+            self.update_state(state='PROGRESS', meta={'message': 'Guardando múltiples volúmenes NIfTI...'})
+            
+            # Guardado Combinado
+            nib.save(nib.Nifti1Image(prob_comb_nifti, affine), os.path.join(case_results_dir, f"prob_maps_{case_id}.nii.gz"))
+            nib.save(nib.Nifti1Image(seg_comb_orig, affine), os.path.join(case_results_dir, f"segmentation_{case_id}.nii.gz"))
+            
+            # Guardado Pipeline 1
+            nib.save(nib.Nifti1Image(prob_p1_nifti, affine), os.path.join(case_results_dir, f"prob_maps_p1_{case_id}.nii.gz"))
+            nib.save(nib.Nifti1Image(seg_p1, affine), os.path.join(case_results_dir, f"segmentation_p1_{case_id}.nii.gz"))
+            
+            # Guardado Pipeline 2
+            nib.save(nib.Nifti1Image(prob_p2_nifti, affine), os.path.join(case_results_dir, f"prob_maps_p2_{case_id}.nii.gz"))
+            nib.save(nib.Nifti1Image(seg_p2, affine), os.path.join(case_results_dir, f"segmentation_p2_{case_id}.nii.gz"))
 
         return {"status": "success", "message": "Inferencia finalizada", "case_id": case_id}
 
