@@ -6,3 +6,5 @@ nibabel==5.1.0
 pydicom==2.4.3
 celery==5.3.4
 redis==5.0.1
+matplotlib==3.8.2
+fpdf2==2.7.7

@@ -6,6 +6,7 @@ from celery import Celery
 from celery import chain
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
+from utils.report_generator import generate_clinical_report
 
 # Configurar cliente Celery para enviar tareas
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
@@ -275,3 +276,28 @@ def start_processing(case_id: str, run_preprocessing: bool = True):
     else:
         task = celery_app.send_task("tasks.run_inference_task", args=[case_id])
         return {"message": "Inferencia encolada", "task_id": task.id}
+    
+# (Tus otros endpoints...)
+
+@app.post("/generate_report/{case_id}")
+def create_report(case_id: str):
+    """Genera el reporte PDF y las gráficas al vuelo."""
+    try:
+        pdf_path = generate_clinical_report(case_id, RESULTS_DIR)
+        return {"message": "Reporte generado con éxito", "pdf_path": pdf_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download_report/{case_id}")
+def download_pdf_report(case_id: str):
+    """Sirve el archivo PDF generado."""
+    file_path = os.path.join(RESULTS_DIR, case_id, f"reporte_clinico_{case_id}.pdf")
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="El reporte PDF aún no ha sido generado.")
+        
+    return FileResponse(
+        path=file_path, 
+        filename=f"Reporte_Oncologico_{case_id}.pdf", 
+        media_type="application/pdf"
+    )

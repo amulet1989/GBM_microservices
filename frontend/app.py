@@ -200,13 +200,13 @@ if st.button(f"🚀 Iniciar Inferencia para {active_case}", type="secondary"):
     except Exception as e:
         st.error(f"Error de conexión: {e}")
 
+
 # ---------------------------------------------------------
-# DESCARGA DE RESULTADOS
+# DESCARGA DE RESULTADOS Y REPORTES
 # ---------------------------------------------------------
 st.divider()
-st.header("📥 Resultados de Inferencia")
+st.header("📥 Resultados de Inferencia y Reportes")
 
-# Usamos caché para no descargar el mismo archivo del backend múltiples veces si recargamos la página
 @st.cache_data(show_spinner=False)
 def fetch_result_file(case_id, file_type):
     url = f"{BACKEND_URL}/download/{case_id}/{file_type}"
@@ -216,47 +216,109 @@ def fetch_result_file(case_id, file_type):
     return None
 
 try:
-    # Preguntar al backend si hay resultados listos
     res_status = requests.get(f"{BACKEND_URL}/results/{active_case}")
     
     if res_status.status_code == 200:
         results_data = res_status.json()
         
         if results_data["segmentation"] or results_data["prob_maps"]:
-            st.success(f"✅ Resultados listos y empaquetados para el paciente: `{active_case}`")
-            cols = st.columns(2)
+            st.success(f"✅ Resultados listos para el paciente: `{active_case}`")
+            cols = st.columns(3) # Cambiamos a 3 columnas para meter el reporte
             
-            # Tarjeta de Segmentación
             if results_data["segmentation"]:
                 with cols[0]:
-                    st.markdown("#### 🧠 Volumen de Segmentación")
-                    st.info("Contiene las etiquetas de Infiltración Tumoral (2) y Edema Vasogénico (6).")
-                    with st.spinner("Preparando archivo..."):
-                        seg_data = fetch_result_file(active_case, "segmentation")
-                        if seg_data:
-                            st.download_button(
-                                label="⬇️ Descargar Segmentación (.nii.gz)",
-                                data=seg_data,
-                                file_name=f"segmentation_{active_case}.nii.gz",
-                                mime="application/gzip",
-                                type="primary"
-                            )
-                            
-            # Tarjeta de Mapas de Probabilidad
+                    seg_data = fetch_result_file(active_case, "segmentation")
+                    if seg_data:
+                        st.download_button("🧠 Descargar Segmentación", data=seg_data, file_name=f"seg_{active_case}.nii.gz", mime="application/gzip", type="primary")
+            
             if results_data["prob_maps"]:
                 with cols[1]:
-                    st.markdown("#### 📊 Mapas de Probabilidad")
-                    st.info("Tensor en formato Float32 con las probabilidades brutas de cada vóxel.")
-                    with st.spinner("Preparando archivo..."):
-                        prob_data = fetch_result_file(active_case, "prob_maps")
-                        if prob_data:
-                            st.download_button(
-                                label="⬇️ Descargar Mapas (.nii.gz)",
-                                data=prob_data,
-                                file_name=f"prob_maps_{active_case}.nii.gz",
-                                mime="application/gzip"
-                            )
+                    prob_data = fetch_result_file(active_case, "prob_maps")
+                    if prob_data:
+                        st.download_button("📊 Descargar Probabilidades", data=prob_data, file_name=f"prob_{active_case}.nii.gz", mime="application/gzip")
+            
+            # --- NUEVA SECCIÓN: REPORTE CLÍNICO ---
+            with cols[2]:
+                if st.button("📄 Generar Reporte PDF", type="primary"):
+                    with st.spinner("Calculando volumetría y armando PDF..."):
+                        report_res = requests.post(f"{BACKEND_URL}/generate_report/{active_case}")
+                        if report_res.status_code == 200:
+                            st.toast("¡Reporte generado exitosamente!")
+                        else:
+                            st.error("Error al generar el reporte.")
+                            
+                # Botón de descarga si el PDF ya existe
+                report_download_res = requests.get(f"{BACKEND_URL}/download_report/{active_case}")
+                if report_download_res.status_code == 200:
+                    st.download_button(
+                        label="⬇️ Descargar PDF",
+                        data=report_download_res.content,
+                        file_name=f"Reporte_{active_case}.pdf",
+                        mime="application/pdf",
+                        type="secondary"
+                    )
         else:
             st.info("Aún no hay resultados de inferencia disponibles para este caso.")
 except Exception as e:
-    st.error(f"Error al verificar la disponibilidad de los resultados: {e}")
+    st.error(f"Error de conexión: {e}")
+
+# ---------------------------------------------------------
+# DESCARGA DE RESULTADOS
+# ---------------------------------------------------------
+# st.divider()
+# st.header("📥 Resultados de Inferencia")
+
+# # Usamos caché para no descargar el mismo archivo del backend múltiples veces si recargamos la página
+# @st.cache_data(show_spinner=False)
+# def fetch_result_file(case_id, file_type):
+#     url = f"{BACKEND_URL}/download/{case_id}/{file_type}"
+#     res = requests.get(url)
+#     if res.status_code == 200:
+#         return res.content
+#     return None
+
+# try:
+#     # Preguntar al backend si hay resultados listos
+#     res_status = requests.get(f"{BACKEND_URL}/results/{active_case}")
+    
+#     if res_status.status_code == 200:
+#         results_data = res_status.json()
+        
+#         if results_data["segmentation"] or results_data["prob_maps"]:
+#             st.success(f"✅ Resultados listos y empaquetados para el paciente: `{active_case}`")
+#             cols = st.columns(2)
+            
+#             # Tarjeta de Segmentación
+#             if results_data["segmentation"]:
+#                 with cols[0]:
+#                     st.markdown("#### 🧠 Volumen de Segmentación")
+#                     st.info("Contiene las etiquetas de Infiltración Tumoral (2) y Edema Vasogénico (6).")
+#                     with st.spinner("Preparando archivo..."):
+#                         seg_data = fetch_result_file(active_case, "segmentation")
+#                         if seg_data:
+#                             st.download_button(
+#                                 label="⬇️ Descargar Segmentación (.nii.gz)",
+#                                 data=seg_data,
+#                                 file_name=f"segmentation_{active_case}.nii.gz",
+#                                 mime="application/gzip",
+#                                 type="primary"
+#                             )
+                            
+#             # Tarjeta de Mapas de Probabilidad
+#             if results_data["prob_maps"]:
+#                 with cols[1]:
+#                     st.markdown("#### 📊 Mapas de Probabilidad")
+#                     st.info("Tensor en formato Float32 con las probabilidades brutas de cada vóxel.")
+#                     with st.spinner("Preparando archivo..."):
+#                         prob_data = fetch_result_file(active_case, "prob_maps")
+#                         if prob_data:
+#                             st.download_button(
+#                                 label="⬇️ Descargar Mapas (.nii.gz)",
+#                                 data=prob_data,
+#                                 file_name=f"prob_maps_{active_case}.nii.gz",
+#                                 mime="application/gzip"
+#                             )
+#         else:
+#             st.info("Aún no hay resultados de inferencia disponibles para este caso.")
+# except Exception as e:
+#     st.error(f"Error al verificar la disponibilidad de los resultados: {e}")

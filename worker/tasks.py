@@ -287,8 +287,8 @@ def run_inference_task(self, case_id: str):
             
             segmentation = np.argmax(prob_maps_np, axis=0).astype(np.int16)
             segmentation_np_orig = np.zeros_like(segmentation, dtype=np.int16)
-            segmentation_np_orig[segmentation == 1] = 6 # Vasogénico
-            segmentation_np_orig[segmentation == 2] = 2 # Infiltrado
+            segmentation_np_orig[segmentation == 1] = 6 # Zona d etratamiento (Tumor Core + Infiltración)
+            segmentation_np_orig[segmentation == 2] = 2 # Vasogénico
 
             self.update_state(state='PROGRESS', meta={'message': 'Guardando volúmenes NIfTI...'})
             
