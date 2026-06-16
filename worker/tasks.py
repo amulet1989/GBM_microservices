@@ -267,7 +267,7 @@ def run_inference_task(self, case_id: str):
 
         #     roi_size = (128, 128, 128)
         #     sw_batch_size = 1 
-        
+
         with torch.no_grad():
             
             def predictor_fn(patch):
@@ -309,7 +309,9 @@ def run_inference_task(self, case_id: str):
 
             roi_size = (128, 128, 128)
             sw_batch_size = 1 
-            # ... (el resto de tu código sliding_window_inference continúa igual)    
+            # ... (el resto de tu código sliding_window_inference continúa igual)  
+            # ----------------------------------------------------------------------------  
+            
             # full_prob_maps ahora tiene tamaño [1, 9, 240, 240, 155]
             full_prob_maps = sliding_window_inference(
                 inputs=image_tensor,
